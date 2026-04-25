@@ -1,0 +1,86 @@
+# Python
+*.pyc
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Data & Models
+data/
+checkpoints/
+outputs/
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.pkl
+*.jpg
+*.png
+*.jpeg
+*.gif
+wandb/
+
+# LaTeX
+*.aux
+*.log
+*.out
+*.toc
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.bbl
+*.blg
+*.lof
+*.lot
+*.nav
+*.snm
+*.vrb
+*.bcf
+*.run.xml
+*.xdv
+*.dvi
+*.ps
+*.pdf
+# Keep README.pdf if needed
+!README.pdf
+
+# LaTeX temporary files
+*.acn
+*.acr
+*.alg
+*.glg
+*.glo
+*.gls
+*.ist
+*.loa
+*.idx
+*.ilg
+*.ind
+*.tdo
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Misc
+*.bak
+*.tmp
+*.temp
+.cache/

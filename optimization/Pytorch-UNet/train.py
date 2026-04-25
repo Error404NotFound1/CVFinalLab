@@ -17,9 +17,10 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
 from evaluate import evaluate
-from unet import UNet
 from utils.data_loading import OxfordPetDataset
 from utils.dice_score import dice_loss
+from utils.losses import CombinedLoss
+import segmentation_models_pytorch as smp
 
 dir_checkpoint = Path('./checkpoints/')
 dir_outputs = Path('./outputs/')
@@ -51,11 +52,13 @@ def train_model(
         save_checkpoint: bool = True,
         image_size: int = 256,
         amp: bool = False,
-        weight_decay: float = 1e-8,
-        momentum: float = 0.999,
+        weight_decay: float = 1e-4,
         gradient_clipping: float = 1.0,
         data_root: str = './data',
         use_wandb: bool = False,
+        use_tta: bool = False,
+        n_classes: int = 3,
+        early_stopping_patience: int = 10,
 ):
     # 1. Create dataset
     full_dataset = OxfordPetDataset(root=data_root, split='trainval', image_size=image_size, augment=True)
@@ -95,11 +98,14 @@ def train_model(
     ''')
 
     # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
-    optimizer = optim.RMSprop(model.parameters(),
-                              lr=learning_rate, weight_decay=weight_decay, momentum=momentum, foreach=True)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+    warmup_epochs = 3
+    warmup_scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
+    main_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+
     grad_scaler = torch.cuda.amp.GradScaler(enabled=(amp and device.type == 'cuda'))
-    criterion = nn.CrossEntropyLoss() if model.n_classes > 1 else nn.BCEWithLogitsLoss()
+    criterion = CombinedLoss()
     global_step = 0
 
     # Metrics CSV
@@ -110,6 +116,7 @@ def train_model(
         writer.writerow(['epoch', 'train_loss', 'val_dice', 'lr'])
 
     best_dice = 0.0
+    patience_counter = 0
 
     # 5. Begin training
     for epoch in range(1, epochs + 1):
@@ -121,26 +128,12 @@ def train_model(
             for batch in train_loader:
                 images, true_masks = batch['image'], batch['mask']
 
-                assert images.shape[1] == model.n_channels, \
-                    f'Network has been defined with {model.n_channels} input channels, ' \
-                    f'but loaded images have {images.shape[1]} channels. Please check that ' \
-                    'the images are loaded correctly.'
-
                 images = images.to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
                 true_masks = true_masks.to(device=device, dtype=torch.long)
 
                 with autocast_context:
                     masks_pred = model(images)
-                    if model.n_classes == 1:
-                        loss = criterion(masks_pred.squeeze(1), true_masks.float())
-                        loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), true_masks.float(), multiclass=False)
-                    else:
-                        loss = criterion(masks_pred, true_masks)
-                        loss += dice_loss(
-                            F.softmax(masks_pred, dim=1).float(),
-                            F.one_hot(true_masks, model.n_classes).permute(0, 3, 1, 2).float(),
-                            multiclass=True
-                        )
+                    loss = criterion(masks_pred, true_masks)
 
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(loss).backward()
@@ -162,8 +155,13 @@ def train_model(
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
 
         # End-of-epoch validation
-        val_score = evaluate(model, val_loader, device, amp)
-        scheduler.step(val_score)
+        val_score = evaluate(model, val_loader, device, amp, use_tta=use_tta)
+
+        if epoch <= warmup_epochs:
+            warmup_scheduler.step()
+        else:
+            main_scheduler.step()
+
         avg_loss = epoch_loss / max(n_batches, 1)
 
         logging.info(f'Epoch {epoch} | train_loss: {avg_loss:.4f} | val_dice: {val_score:.4f} | lr: {optimizer.param_groups[0]["lr"]:.2e}')
@@ -188,8 +186,15 @@ def train_model(
 
             if val_score > best_dice:
                 best_dice = val_score
+                patience_counter = 0
                 torch.save(state_dict, str(dir_checkpoint / 'best.pth'))
                 logging.info(f'Best model updated! Dice: {best_dice:.4f}')
+            else:
+                patience_counter += 1
+                logging.info(f'No improvement for {patience_counter} epoch(s)')
+                if patience_counter >= early_stopping_patience:
+                    logging.info(f'Early stopping triggered at epoch {epoch}')
+                    break
 
     logging.info(f'Training complete. Best validation Dice: {best_dice:.4f}')
 
@@ -197,7 +202,7 @@ def train_model(
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on Oxford-IIIT Pet Dataset')
     parser.add_argument('--epochs', '-e', metavar='E', type=int, default=30, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=8, help='Batch size')
+    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=16, help='Batch size')
     parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
@@ -211,6 +216,10 @@ def get_args():
     parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cpu', 'cuda', 'mps'],
                         help='Device to use (auto, cpu, cuda, mps)')
     parser.add_argument('--wandb', action='store_true', default=False, help='Enable wandb logging')
+    parser.add_argument('--use-tta', action='store_true', default=False, help='Use Test-Time Augmentation')
+    parser.add_argument('--encoder', type=str, default='resnet34', help='Encoder backbone (resnet34, resnet50, efficientnet-b3)')
+    parser.add_argument('--encoder-weights', type=str, default='imagenet', help='Pretrained weights (imagenet or None)')
+    parser.add_argument('--early-stopping', type=int, default=10, help='Early stopping patience (epochs)')
 
     return parser.parse_args()
 
@@ -227,17 +236,24 @@ if __name__ == '__main__':
         device = torch.device(args.device)
     logging.info(f'Using device {device}')
 
-    model = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
+    model = smp.Unet(
+        encoder_name=args.encoder,
+        encoder_weights=args.encoder_weights,
+        in_channels=3,
+        classes=args.classes,
+    )
     model = model.to(memory_format=torch.channels_last)
 
     logging.info(f'Network:\n'
-                 f'\t{model.n_channels} input channels\n'
-                 f'\t{model.n_classes} output channels (classes)\n'
-                 f'\t{"Bilinear" if model.bilinear else "Transposed conv"} upscaling')
+                 f'\tEncoder: {args.encoder}\n'
+                 f'\tEncoder weights: {args.encoder_weights}\n'
+                 f'\t3 input channels\n'
+                 f'\t{args.classes} output channels (classes)')
 
     if args.load:
-        state_dict = torch.load(args.load, map_location=device)
-        del state_dict['mask_values']
+        state_dict = torch.load(args.load, map_location=device, weights_only=False)
+        if 'mask_values' in state_dict:
+            del state_dict['mask_values']
         model.load_state_dict(state_dict)
         logging.info(f'Model loaded from {args.load}')
 
@@ -254,17 +270,18 @@ if __name__ == '__main__':
             amp=args.amp,
             data_root=args.data_root,
             use_wandb=args.wandb,
+            use_tta=args.use_tta,
+            n_classes=args.classes,
+            early_stopping_patience=args.early_stopping,
         )
     except torch.cuda.OutOfMemoryError:
         logging.error('Detected OutOfMemoryError! '
-                      'Enabling checkpointing to reduce memory usage, but this slows down training. '
-                      'Consider enabling AMP (--amp) for fast and memory efficient training')
+                      'Reducing batch size and retrying...')
         torch.cuda.empty_cache()
-        model.use_checkpointing()
         train_model(
             model=model,
             epochs=args.epochs,
-            batch_size=args.batch_size,
+            batch_size=args.batch_size // 2,
             learning_rate=args.lr,
             device=device,
             image_size=args.image_size,
@@ -272,4 +289,6 @@ if __name__ == '__main__':
             amp=args.amp,
             data_root=args.data_root,
             use_wandb=args.wandb,
+            use_tta=args.use_tta,
+            n_classes=args.classes,
         )

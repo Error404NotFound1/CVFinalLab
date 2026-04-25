@@ -1,0 +1,14 @@
+#!/usr/bin/perl
+# Latexmk configuration file for TJU Thesis
+
+# Use xelatex engine for better CJK support on macOS
+$pdf_mode = 5;  # 5 = xelatex
+
+# Output directory
+$out_dir = '.';
+
+# Sync settings
+$synctex = 1;
+
+# Clean auxiliary files on -c flag
+$clean_full_ext = "aux fls fmt fdb_latexmk log out toc tof lot thm %R-blx.bib %R.bbl";

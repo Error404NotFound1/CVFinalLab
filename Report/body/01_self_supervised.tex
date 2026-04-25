@@ -1,0 +1,252 @@
+% !Mode:: "TeX:UTF-8"
+
+\chapter{自监督学习（SimCLR）}
+
+\section{实验目标与任务}
+本实验的目标是实现 SimCLR 对比学习框架，通过自监督方式在 CIFAR-10 数据集上学习高质量的图像特征表示。主要任务包括：
+\begin{itemize}
+    \item \textbf{数据增强管线}：在 \texttt{data\_utils.py} 中构建随机裁剪、翻转、颜色抖动、灰度化等增强操作，为每张图像生成两个独立的增强视图 $\tilde{x}_i$ 和 $\tilde{x}_j$。
+    \item \textbf{相似度函数}：实现余弦相似度函数 \texttt{sim} 和批量正例对相似度函数 \texttt{sim\_positive\_pairs}。
+    \item \textbf{NT-Xent 对比损失}：实现 Naive 循环版本 \texttt{simclr\_loss\_naive} 与无循环的向量化版本 \texttt{simclr\_loss\_vectorized}。
+    \item \textbf{训练函数}：完成 \texttt{train()} 函数，将模型输出送入对比损失并反向传播。
+    \item \textbf{线性评价（Linear Evaluation）}：在冻结特征提取器的情况下，训练线性分类器验证预训练特征质量，并与无预训练的基线模型进行对比。
+\end{itemize}
+
+\section{理论背景}
+
+\subsection{自监督对比学习思想}
+传统监督学习高度依赖人工标注，而自监督学习利用数据自身的内在结构构造监督信号。SimCLR 的核心思想是：给定图像 $x$，使用两种不同的随机增强变换 $t \sim \mathcal{T}$ 和 $t' \sim \mathcal{T}$ 生成正样本对 $(\tilde{x}_i, \tilde{x}_j)$；同一 Batch 中不同图像的增强视图互为负例。模型被训练为将正例对的表示拉近，同时将负例对的表示推远。
+
+预训练完成后，投影头 $g(\cdot)$ 被丢弃，仅保留编码器 $f(\cdot)$ 和表示向量 $h$ 用于下游任务（如分类）。
+
+\subsection{模型架构}
+SimCLR 模型（参见 \texttt{model.py}）由两部分组成：
+\begin{itemize}
+    \item \textbf{编码器 $f(\cdot)$}：基于 ResNet-50 的主干网络，输入增强图像，输出 2048 维表示 $h$。
+    \item \textbf{投影头 $g(\cdot)$}：由两层全连接（含 BN 和 ReLU）组成的 MLP，将 $h$ 映射为 128 维归一化向量 $z$，对比损失在 $z$ 空间上计算。
+\end{itemize}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.55\textwidth]{figures/self_supervised/Simclr_view.png}
+    \caption{SimCLR 架构示意图}
+    \label{fig:simclr_arch}
+\end{figure}
+
+\subsection{NT-Xent 损失函数}
+对于 Batch 大小为 $N$ 的训练数据，将其两路增强后拼接为 $2N$ 个样本。对第 $k$ 个正例对，单边损失定义为：
+\[
+\ell(i, j) = -\log\frac{\exp(\text{sim}(z_i, z_j) / \tau)}{\sum_{k=1}^{2N} \mathbf{1}_{[k \neq i]} \exp(\text{sim}(z_i, z_k) / \tau)}
+\]
+总损失为所有 $2N$ 个样本的平均：
+\[
+\mathcal{L} = \frac{1}{2N}\sum_{k=1}^{N} \left[ \ell(k, k+N) + \ell(k+N, k) \right]
+\]
+其中 $\text{sim}(u, v) = u^\top v / (\|u\| \|v\|)$ 为余弦相似度，$\tau$ 为温度超参数。
+
+\section{实验设置}
+
+本实验使用 CIFAR-10 数据集。实验环境依赖 \texttt{thop}（用于统计模型参数量和 FLOPs）及 \texttt{zombie\_imp} 等库，成功安装后使用 GPU（CUDA）加速训练；若无 GPU 则回退至 CPU。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\textwidth]{figures/self_supervised/envprepare.png}
+    \caption{实验环境依赖安装日志}
+    \label{fig:envprepare}
+\end{figure}
+
+为方便本实验，作业提供了在 CIFAR-10 上预训练约 18 小时的模型权重，运行对应单元格后将下载至 \texttt{pretrained\_model/pretrained\_simclr\_model.pth}：
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.88\textwidth]{figures/self_supervised/Downloading weights.png}
+    \caption{下载预训练 SimCLR 权重}
+    \label{fig:download_weights}
+\end{figure}
+
+\section{代码实现}
+
+\subsection{数据增强与正例对生成（data\_utils.py）}
+
+数据增强管线依照 SimCLR 论文设计，包含以下步骤：
+\begin{enumerate}
+    \item 随机裁剪并缩放至 $32 \times 32$（\texttt{RandomResizedCrop}）。
+    \item 以 0.5 的概率进行水平翻转（\texttt{RandomHorizontalFlip}）。
+    \item 以 0.8 的概率应用颜色抖动（亮度、对比度、饱和度各 0.4，色调 0.1）。
+    \item 以 0.2 的概率转换为灰度图。
+    \item 归一化至 CIFAR-10 数据集均值和标准差。
+\end{enumerate}
+
+\begin{codeblock}{compute\_train\_transform：数据增强组合}
+train_transform = transforms.Compose([
+    # Step 1: Randomly resize and crop to 32x32.
+    transforms.RandomResizedCrop(32),
+    # Step 2: Horizontally flip the image with probability 0.5
+    transforms.RandomHorizontalFlip(p=0.5),
+    # Step 3: With a probability of 0.8, apply color jitter
+    transforms.RandomApply([color_jitter], p=0.8),
+    # Step 4: With a probability of 0.2, convert the image to grayscale
+    transforms.RandomGrayscale(p=0.2),
+    transforms.ToTensor(),
+    transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+\end{codeblock}
+
+\texttt{CIFAR10Pair} 类对同一张图像独立调用两次 transform，生成正例对 $(x_i, x_j)$：
+
+\begin{codeblock}{CIFAR10Pair.\_\_getitem\_\_：生成正例对}
+if self.transform is not None:
+    x_i = self.transform(img)
+    x_j = self.transform(img)
+\end{codeblock}
+
+数据增强实现的正确性通过 sanity check 验证，最大误差为 0：
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.72\textwidth]{figures/self_supervised/Data Augmentation.png}
+    \caption{数据增强验证：同一图像的两个增强视图}
+    \label{fig:data_aug}
+\end{figure}
+
+\subsection{相似度与损失函数（contrastive\_loss.py）}
+
+\subsubsection{余弦相似度}
+
+\begin{codeblock}{sim()：标量余弦相似度}
+def sim(z_i, z_j):
+    norm_dot_product = (z_i * z_j).sum() / (
+        torch.linalg.norm(z_i) * torch.linalg.norm(z_j))
+    return norm_dot_product
+\end{codeblock}
+
+\subsubsection{NT-Xent 损失（朴素版）}
+朴素版通过双重 for 循环，对每个正例对逐一计算 $\ell(k, k+N)$ 和 $\ell(k+N, k)$：
+
+\begin{codeblock}{simclr\_loss\_naive()：朴素循环版}
+for k in range(N):
+    # Compute l(k, k+N)
+    denom_k = 0
+    for i in range(2*N):
+        if i != k:
+            denom_k += torch.exp(sim(out[k], out[i]) / tau)
+    l_k_kN = -torch.log(torch.exp(sim(out[k], out[k+N]) / tau) / denom_k)
+
+    # Compute l(k+N, k)
+    denom_kN = 0
+    for i in range(2*N):
+        if i != k+N:
+            denom_kN += torch.exp(sim(out[k+N], out[i]) / tau)
+    l_kN_k = -torch.log(torch.exp(sim(out[k+N], out[k]) / tau) / denom_kN)
+
+    total_loss += (l_k_kN + l_kN_k)
+total_loss = total_loss / (2 * N)
+\end{codeblock}
+
+\subsubsection{向量化相似度与损失}
+\texttt{sim\_positive\_pairs} 批量计算所有正例对的余弦相似度；\texttt{compute\_sim\_matrix} 利用矩阵乘法一次性计算 $2N \times 2N$ 相似度矩阵：
+
+\begin{codeblock}{sim\_positive\_pairs 与 compute\_sim\_matrix：向量化相似度}
+def sim_positive_pairs(out_left, out_right):
+    norm_left = torch.linalg.norm(out_left, dim=1, keepdim=True)
+    norm_right = torch.linalg.norm(out_right, dim=1, keepdim=True)
+    pos_pairs = torch.sum(out_left * out_right, dim=1, keepdim=True) \
+                / (norm_left * norm_right)
+    return pos_pairs
+
+def compute_sim_matrix(out):
+    norm = torch.linalg.norm(out, dim=1, keepdim=True)
+    sim_matrix = torch.mm(out, out.t()) / torch.mm(norm, norm.t())
+    return sim_matrix
+\end{codeblock}
+
+向量化 NT-Xent 损失不使用任何显式循环：
+
+\begin{codeblock}{simclr\_loss\_vectorized()：向量化版}
+# Step 1: 计算指数相似度并去除对角线（i=k）
+exponential = torch.exp(sim_matrix / tau)
+mask = (torch.ones_like(exponential, device=device) -
+        torch.eye(2 * N, device=device)).to(device).bool()
+exponential = exponential.masked_select(mask).view(2 * N, -1)
+denom = torch.sum(exponential, dim=1, keepdim=True)  # [2N,1]
+
+# Step 2 & 3: 正例对相似度 -> 分子
+sim_pos = sim_positive_pairs(out_left, out_right)  # [N,1]
+sim_pos = torch.cat([sim_pos, sim_pos], dim=0)     # [2N,1]
+numerator = torch.exp(sim_pos / tau)
+
+# Step 4: 计算总损失
+loss = -torch.log(numerator / denom).sum() / (2 * N)
+\end{codeblock}
+
+两组 sanity check 验证了所有函数实现的数值正确性（相对误差 $< 10^{-7}$）：
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.73\textwidth]{figures/self_supervised/test_sim_loss.png}
+    \caption{\texttt{sim} 与 \texttt{simclr\_loss\_naive} 数值验证}
+    \label{fig:test_sim_naive}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.73\textwidth]{figures/self_supervised/test_sim_loss2.png}
+    \caption{向量化相似度与损失函数数值验证}
+    \label{fig:test_sim_vec}
+\end{figure}
+
+\subsection{训练函数（utils.py）}
+\texttt{train()} 函数将两路增强视图 $x_i, x_j$ 送入模型，提取投影头输出并计算对比损失：
+
+\begin{codeblock}{train()：SimCLR 单步训练逻辑}
+_, out_left = model(x_i)    # 忽略 backbone 特征，只取投影头输出
+_, out_right = model(x_j)
+loss = simclr_loss_vectorized(out_left, out_right,
+                              tau=temperature, device=device)
+\end{codeblock}
+
+\section{实验结果与分析}
+
+\subsection{SimCLR 预训练}
+加载预训练权重后，继续进行微量训练（1 epoch），SimCLR 模型（24.62M 参数，1.31G FLOPs）收敛了，训练损失为 3.2578，KNN 评估的 Top-1 准确率达到 \textbf{83.44\%}，Top-5 达到 \textbf{99.37\%}：
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/self_supervised/Train the SimCLR model.png}
+    \caption{SimCLR 预训练日志（Acc@1 = 83.44\%, Acc@5 = 99.37\%）}
+    \label{fig:train_simclr}
+\end{figure}
+
+\subsection{基线对比：无自监督预训练}
+将预训练的 SimCLR 编码器去掉投影头，替换为随机初始化的网络，冻结前几层并附加线性分类层，从零开始训练 10 个 epoch。由于未经任何表示预训练，模型仅能学到随机特征，Top-1 准确率极低（约 \textbf{15.3\%}）：
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/self_supervised/Baseline: Without Self-Supervised Learning.png}
+    \caption{基线模型（无预训练）训练日志：最佳 Top-1 = 15.3\%}
+    \label{fig:baseline}
+\end{figure}
+
+\subsection{自监督预训练 + 线性微调}
+使用 SimCLR 预训练的编码器（冻结权重），仅训练顶部线性分类层，同样训练 10 个 epoch。借助高质量的预训练特征，模型迅速收敛，Top-1 准确率达到 \textbf{82.36\%}：
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.88\textwidth]{figures/self_supervised/With Self-Supervised Learning.png}
+    \caption{SimCLR 预训练 + 线性微调训练日志：最佳 Top-1 = 82.36\%}
+    \label{fig:with_ssl}
+\end{figure}
+
+\subsection{对比总结}
+图 \ref{fig:comparison} 同时展示了两种方案在 10 个 epoch 内的测试准确率变化曲线。自监督预训练模型从第 0 epoch 起即保持约 78\%--83\% 的准确率并持续上升，而无预训练基线始终徘徊在 10\%--16\% 附近，两者存在约 \textbf{67 个百分点}的巨大差距。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.62\textwidth]{figures/self_supervised/Comparison.png}
+    \caption{有无自监督预训练的 Top-1 准确率对比}
+    \label{fig:comparison}
+\end{figure}
+
+\section{本章小结}
+本章完整实现了 SimCLR 自监督对比学习框架，包括数据增强正例对生成、NT-Xent 损失函数（朴素版与向量化版）及训练步骤。
+
+实验结果表明，SimCLR 预训练能够在完全没有标注数据的情况下，仅凭数据增强所定义的"语义等价"关系，在 CIFAR-10 上习得高质量的视觉表示。在线性评价协议下，预训练模型的 Top-1 准确率（82.36\%）比无预训练基线（15.3\%）高出约 67 个百分点，充分验证了自监督学习在数据标注稀缺场景下的巨大潜力。
