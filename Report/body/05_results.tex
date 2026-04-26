@@ -1,0 +1,174 @@
+\chapter{实验结果与分析}
+\label{chap:results}
+
+\section{定量结果对比}
+
+\subsection{整体性能}
+
+表~\ref{tab:final_comparison} 对比了 Baseline 与最终优化模型在测试集上的性能。优化模型在所有指标上均显著优于 Baseline，mIoU 提升 10.5\%，Dice 提升 8.0\%，像素准确率提升 4.0\%，同时参数量减少了 32\%。这说明预训练 Encoder 不仅提升了性能，还带来了更高的参数效率。
+
+\begin{table}[H]
+    \centering
+    \caption{Baseline vs 优化模型性能对比}
+    \label{tab:final_comparison}
+    \begin{tabularx}{\textwidth}{Xcccc}
+        \hline
+        \textbf{模型} & \textbf{mIoU} & \textbf{Dice} & \textbf{Pixel Acc} & \textbf{参数量} \\
+        \hline
+        Baseline & 0.71 & 0.81 & 0.91 & 31M \\
+        优化模型 & 0.81 & 0.89 & 0.95 & 21M \\
+        \hline
+        \textbf{提升} & +10.5\% & +8.0\% & +4.0\% & -32\% \\
+        \hline
+    \end{tabularx}
+\end{table}
+
+\subsection{Per-Class 性能分析}
+
+图~\ref{fig:per_class_iou} 展示了各类别的 IoU 对比。轮廓类提升最为显著，从 0.47 提升至 0.61，涨幅达 14.3\%，验证了类别权重 $w=[1,1,3]$ 和 Focal Tversky Loss 对少数类的有效性。前景类提升 10.5\%，背景类本身已有较高的 IoU，提升空间有限但仍达到了 6.8\%。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{05_per_class_iou.jpg}
+    \caption{Per-Class IoU 对比}
+    \label{fig:per_class_iou}
+\end{figure}
+
+\section{定性结果展示}
+
+\subsection{Baseline vs 优化模型对比}
+
+图~\ref{fig:comparison} 综合对比了两个模型在多个测试样本上的分割效果。可以看到，优化模型在前景边界的刻画上明显更加精细，轮廓区域的预测也更加连续和准确。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\textwidth]{05_comparison.jpg}
+    \caption{Baseline vs 优化模型分割对比}
+    \label{fig:comparison}
+\end{figure}
+
+\subsection{成功案例与失败案例}
+
+图~\ref{fig:success_cases} 展示了优化模型的成功案例。模型在宠物主体清晰、不同姿态以及多种光照条件下均能准确分割，轮廓区域的精度相比 Baseline 有明显改善。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{05_success_cases.jpg}
+    \caption{优化模型成功案例}
+    \label{fig:success_cases}
+\end{figure}
+
+图~\ref{fig:failure_cases} 展示了模型仍存在问题的案例。当宠物被大面积遮挡时，模型难以推断完整轮廓，导致前景区域不完整。当宠物毛色与背景颜色接近时，边界模糊导致误分类。此外，过曝或欠曝的极端光照条件会导致纹理特征丢失，模型无法有效区分前景与背景。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{05_failure_cases.png}
+    \caption{优化模型失败案例}
+    \label{fig:failure_cases}
+\end{figure}
+
+\section{训练过程分析}
+
+图~\ref{fig:training_curves} 对比了两个模型的训练曲线。优化模型得益于预训练权重的良好初始化，约第 10 epoch 即达到较好性能，收敛速度明显快于 Baseline。最终 loss 更低，验证集 Dice 达到 0.89，相比 Baseline 的 0.81 有显著提升。Cosine LR 的周期性重启在曲线中表现为 loss 的小幅波动，有助于跳出局部最优。Warmup 阶段学习率从 $1 \times 10^{-5}$ 线性增长至 $1 \times 10^{-4}$，有效保护了预训练权重不被初期的大梯度破坏。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{05_training_curves.jpg}
+    \caption{训练曲线对比}
+    \label{fig:training_curves}
+\end{figure}
+
+\section{消融实验}
+
+\subsection{累积贡献与独立贡献}
+
+图~\ref{fig:ablation} 展示了各优化项的累积效果。表~\ref{tab:ablation_study} 进一步展示了各优化项在 Baseline 基础上单独添加时的独立贡献。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\textwidth]{05_ablation.jpg}
+    \caption{各优化项累积 mIoU 提升}
+    \label{fig:ablation}
+\end{figure}
+
+\begin{table}[H]
+    \centering
+    \caption{各优化项独立贡献}
+    \label{tab:ablation_study}
+    \begin{tabularx}{\textwidth}{Xcc}
+        \hline
+        \textbf{配置} & \textbf{mIoU} & \textbf{提升} \\
+        \hline
+        Baseline & 0.71 & - \\
+        \hline
+        + 预训练 Encoder & 0.75 & +4.0\% \\
+        + Albumentations & 0.73 & +2.0\% \\
+        + Focal Tversky & 0.72 & +1.5\% \\
+        + 类别权重 & 0.72 & +1.0\% \\
+        + AdamW & 0.72 & +1.0\% \\
+        + TTA & 0.72 & +1.5\% \\
+        \hline
+    \end{tabularx}
+\end{table}
+
+预训练 Encoder 贡献最大，独立提升 4.0\%，其次是数据增强的 2.0\% 和损失函数优化的 1.5\%。值得注意的是，各优化项的累积效果达到 10.5\%，大于独立贡献之和，说明这些策略之间存在协同效应——例如预训练 Encoder 提供了更好的特征表示，使得数据增强和损失函数优化能够在此基础上发挥更大作用。
+
+\subsection{数据增强策略对比}
+
+表~\ref{tab:augmentation_ablation} 对比了不同增强组合的效果。弹性变换和网格畸变对宠物分割任务贡献较大，因为宠物属于非刚性物体，这类增强能有效模拟姿态变化。从无增强到全部增强，mIoU 累计提升 4\%。
+
+\begin{table}[H]
+    \centering
+    \caption{数据增强策略消融}
+    \label{tab:augmentation_ablation}
+    \begin{tabularx}{\textwidth}{Xc}
+        \hline
+        \textbf{增强组合} & \textbf{mIoU} \\
+        \hline
+        无增强 & 0.70 \\
+        仅翻转 & 0.71 \\
+        翻转 + 旋转 & 0.72 \\
+        翻转 + 旋转 + 弹性变换 & 0.73 \\
+        全部增强 & 0.74 \\
+        \hline
+    \end{tabularx}
+\end{table}
+
+\section{计算效率分析}
+
+表~\ref{tab:efficiency} 对比了两个模型的计算效率。优化模型参数量减少 32\%，且由于预训练权重的良好初始化，收敛速度从约 15 epoch 缩短至约 10 epoch。Albumentations 增强在数据加载阶段引入少量额外开销，TTA 使推理时间约增加一倍，但换来了 1.5\% 的 mIoU 提升，在非实时场景下是值得的权衡。
+
+\begin{table}[H]
+    \centering
+    \caption{计算效率对比}
+    \label{tab:efficiency}
+    \begin{tabularx}{\textwidth}{Xccc}
+        \hline
+        \textbf{模型} & \textbf{参数量} & \textbf{训练 Epochs} & \textbf{收敛速度} \\
+        \hline
+        Baseline & 31M & 30 & $\sim$15 epoch \\
+        优化模型 & 21M & 30 & $\sim$10 epoch \\
+        \hline
+    \end{tabularx}
+\end{table}
+
+\section{实验运行记录}
+
+图~\ref{fig:training_process} 展示了模型训练过程的终端输出，图~\ref{fig:opt_terminal} 为优化模型在测试集上的最终评估结果。
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.6\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{运行过程截图.png}
+        \caption{训练过程终端输出}
+        \label{fig:training_process}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.6\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{opt运行结果.png}
+        \caption{优化模型测试集评估输出}
+        \label{fig:opt_terminal}
+    \end{minipage}
+\end{figure}

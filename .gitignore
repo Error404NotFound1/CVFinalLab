@@ -9,6 +9,11 @@ venv/
 env/
 ENV/
 .venv
+build/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
 
 # IDE
 .idea/
@@ -21,16 +26,27 @@ ENV/
 data/
 checkpoints/
 outputs/
+runs/
+lightning_logs/
 *.pth
 *.pt
 *.ckpt
 *.h5
 *.pkl
+*.pickle
+*.tar.gz
+*.zip
+wandb/
+
+# Images (keep figures for report)
 *.jpg
 *.png
 *.jpeg
 *.gif
-wandb/
+!Report/figures/*.jpg
+!Report/figures/*.png
+!Report/figures/*.jpeg
+!Report/figures/*.pdf
 
 # LaTeX
 *.aux
@@ -53,8 +69,12 @@ wandb/
 *.dvi
 *.ps
 *.pdf
-# Keep README.pdf if needed
+*.thm
+*.gz(busy)
+*.synctex(busy)
+# Keep README.pdf and figures
 !README.pdf
+!Report/figures/*.pdf
 
 # LaTeX temporary files
 *.acn
@@ -69,11 +89,15 @@ wandb/
 *.ilg
 *.ind
 *.tdo
+Report/_minted-*/
+Report/auto/
 
 # macOS
 .DS_Store
 .AppleDouble
 .LSOverride
+._*
+Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
@@ -84,3 +108,5 @@ wandb/
 *.tmp
 *.temp
 .cache/
+*.csv
+!Report/tables/*.csv

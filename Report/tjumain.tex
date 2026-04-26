@@ -35,12 +35,17 @@
 	\titleformat{\chapter}{\centering\xiaosan\hei\bfseries}{\chaptername}{2em}{} % 恢复chapter标题格式要求
 
 	%%%%%% 这里是正文，每个文件对应正文中的一章 %%%%%%
-	\input{body/00_overview}
-	\input{body/01_self_supervised}
-	\input{body/02_transformer_captioning}
-	\input{body/03_large_scale_models}
-	\input{body/04_generative_models}
-	\input{body/05_summary}
-	
+	\input{body/01_introduction}
+	\input{body/02_dataset}
+	\input{body/03_baseline}
+	\input{body/04_optimization}
+	\input{body/05_results}
+	\input{body/06_conclusion}
+
 	\clearpage
+
+	% 参考文献
+	\bibliographystyle{unsrt}
+	\bibliography{references}
+
 \end{document}                                 % 结束全文

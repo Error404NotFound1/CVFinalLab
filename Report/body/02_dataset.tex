@@ -1,0 +1,49 @@
+\chapter{数据集与评估指标}
+\label{chap:dataset}
+
+\section{Oxford-IIIT Pet Dataset}
+
+\subsection{数据集概述}
+
+Oxford-IIIT Pet Dataset~\cite{parkhi2012cats} 包含 37 种猫狗品种的图像，共 7,390 张，其中训练集 3,680 张，测试集 3,669 张。每张图像配有 trimap 标注，将像素分为三类：类别 0 为前景，即宠物主体；类别 1 为背景，即非宠物区域；类别 2 为轮廓，即前景与背景之间宽度约 2--3 像素的边界。图~\ref{fig:dataset_samples} 展示了数据集中的典型样本及其对应的分割标注。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.65\textwidth]{02_dataset_samples.jpg}
+    \caption{数据集样本及 trimap 标注}
+    \label{fig:dataset_samples}
+\end{figure}
+
+\subsection{数据集特点与挑战}
+
+统计训练集的像素分布后发现，前景占 42.1\%，背景占 54.7\%，而轮廓仅占 3.2\%，如图~\ref{fig:class_distribution} 所示。这种严重的类别不平衡意味着模型在标准交叉熵损失下几乎不会关注轮廓区域。此外，数据集中宠物处于站立、趴卧、跳跃等多种姿态，部分图像还存在物体遮挡、强光照或阴影等干扰因素，进一步增加了分割难度。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.6\textwidth]{02_class_distribution.jpg}
+    \caption{训练集像素类别分布}
+    \label{fig:class_distribution}
+\end{figure}
+
+\section{评估指标}
+
+\subsection{Dice 系数}
+Dice 系数衡量预测与真实标注的重叠程度：
+\begin{equation}
+    \text{Dice} = \frac{2 |X \cap Y|}{|X| + |Y|}
+\end{equation}
+其中 $X$ 为预测集合，$Y$ 为真实标注集合。本实验使用 multiclass Dice，忽略背景类。
+
+\subsection{交并比}
+IoU 是分割任务的标准指标：
+\begin{equation}
+    \text{IoU}_c = \frac{TP_c}{TP_c + FP_c + FN_c}
+\end{equation}
+其中 $c$ 为类别索引。平均 IoU 即 mIoU，为所有类别 IoU 的均值。
+
+\subsection{像素准确率}
+\begin{equation}
+    \text{Pixel Acc} = \frac{\sum_{c} TP_c}{\text{Total Pixels}}
+\end{equation}
+
+本实验以 mIoU 作为主要评估指标，辅以 Dice 和 Pixel Accuracy。

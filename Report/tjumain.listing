@@ -1,4 +1,7 @@
-_, out_left = model(x_i)    # 忽略 backbone 特征，只取投影头输出
-_, out_right = model(x_j)
-loss = simclr_loss_vectorized(out_left, out_right,
-                              tau=temperature, device=device)
+from scipy.ndimage import binary_opening, binary_closing
+
+for c in range(num_classes):
+    mask_c = (pred == c)
+    mask_c = binary_opening(mask_c, structure=np.ones((3,3)))
+    mask_c = binary_closing(mask_c, structure=np.ones((3,3)))
+    result[mask_c] = c

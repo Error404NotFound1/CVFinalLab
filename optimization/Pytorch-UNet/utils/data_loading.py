@@ -179,7 +179,8 @@ class OxfordPetDataset(Dataset):
 
         transformed = self.transform(image=image_np, mask=mask_mapped)
         img_tensor = transformed['image']
-        mask_tensor = torch.from_numpy(transformed['mask']).long()
+        mask_tensor = transformed['mask'] if isinstance(transformed['mask'], torch.Tensor) else torch.from_numpy(transformed['mask'])
+        mask_tensor = mask_tensor.long()
 
         return {
             'image': img_tensor,

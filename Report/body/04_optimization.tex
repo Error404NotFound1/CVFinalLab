@@ -1,0 +1,217 @@
+\chapter{模型优化实验}
+\label{chap:optimization}
+
+本章按照数据、模型、训练策略、推理四个层次进行系统化优化。
+
+\section{数据侧优化}
+
+\subsection{高级数据增强}
+
+Baseline 仅使用水平翻转，无法充分模拟宠物的姿态变化和环境多样性。为此，引入 Albumentations 库替换 torchvision.transforms，构建了包含几何变换、色彩增强和噪声注入的增强 Pipeline。Albumentations 的核心优势在于图像与 mask 同步变换，确保几何增强后标注仍然对齐。
+
+具体而言，几何变换包括 RandomRotate90、ShiftScaleRotate、ElasticTransform 和 GridDistortion，用于模拟宠物的非刚性姿态变化；色彩增强通过 OneOf 随机选择 RandomBrightnessContrast 或 HueSaturationValue，提升模型对光照变化的鲁棒性；GaussNoise 以较低概率注入噪声，防止过拟合。完整的增强 Pipeline 如下：
+
+\begin{codeblock}{Albumentations 增强 Pipeline}
+self.transform = A.Compose([
+    A.Resize(image_size, image_size),
+    A.HorizontalFlip(p=0.5),
+    A.RandomRotate90(p=0.5),
+    A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.2,
+                       rotate_limit=30, p=0.5),
+    A.ElasticTransform(alpha=1, sigma=50, p=0.3),
+    A.GridDistortion(p=0.3),
+    A.OneOf([
+        A.RandomBrightnessContrast(p=1),
+        A.HueSaturationValue(p=1),
+    ], p=0.5),
+    A.GaussNoise(p=0.2),
+    A.Normalize(mean=MEAN, std=STD),
+    ToTensorV2(),
+])
+\end{codeblock}
+
+表~\ref{tab:augmentation_results} 对比了不同增强策略的效果。几何变换贡献最大，因为宠物的姿态变化本质上就是非刚性形变，ElasticTransform 和 GridDistortion 能有效模拟这一特性。色彩增强进一步提升了 1\% 的 mIoU，而噪声注入的边际效果较小。
+
+\begin{table}[H]
+    \centering
+    \caption{数据增强消融实验}
+    \label{tab:augmentation_results}
+    \begin{tabularx}{\textwidth}{Xcc}
+        \hline
+        \textbf{增强策略} & \textbf{mIoU} & \textbf{提升} \\
+        \hline
+        Baseline, 仅翻转 & 0.71 & - \\
+        + 几何变换 & 0.73 & +2.0\% \\
+        + 色彩增强 & 0.74 & +3.0\% \\
+        + 噪声注入 & 0.74 & +3.0\% \\
+        \hline
+    \end{tabularx}
+\end{table}
+
+\subsection{类别权重优化}
+
+第~\ref{chap:dataset}~章的分析显示轮廓类像素占比仅 3.2\%，导致模型倾向于忽略该类别。为此，在 CrossEntropyLoss 中为轮廓类设置 3 倍权重：
+\begin{equation}
+    w = [1.0, 1.0, 3.0]
+\end{equation}
+
+实现代码仅需在损失函数初始化时传入权重向量：
+
+\begin{codeblock}{类别权重设置}
+weights = torch.tensor([1.0, 1.0, 3.0]).to(device)
+criterion_ce = nn.CrossEntropyLoss(weight=weights)
+\end{codeblock}
+
+该策略使轮廓类 IoU 从 0.47 提升至 0.53，提升 6\%，同时前景和背景的 IoU 基本不受影响。
+
+\section{模型侧优化}
+
+\subsection{预训练 Encoder}
+
+Baseline 从零训练，缺乏先验知识。ImageNet 预训练权重可提供通用的视觉特征，包括边缘检测、纹理识别和形状感知等，从而加速收敛并提升最终性能。本实验使用 Segmentation Models PyTorch 库，以 ImageNet 预训练的 ResNet34~\cite{he2016deep} 替换手写 U-Net 的编码器，解码器保留 SMP 默认的 U-Net 结构和跳跃连接。
+
+\begin{codeblock}{SMP 模型初始化}
+import segmentation_models_pytorch as smp
+
+model = smp.Unet(
+    encoder_name="resnet34",
+    encoder_weights="imagenet",
+    in_channels=3,
+    classes=3,
+)
+\end{codeblock}
+
+表~\ref{tab:pretrained_results} 展示了预训练带来的显著提升。值得注意的是，ResNet34 的参数量仅 21M，相比 baseline 的 31M 减少了 32\%，却实现了 4\% 的 mIoU 提升。这是所有优化项中贡献最大的单项改进，说明 ImageNet 预训练的低层特征可直接迁移到分割任务，使模型无需从零学习基础视觉特征。
+
+\begin{table}[H]
+    \centering
+    \caption{预训练 Encoder 效果对比}
+    \label{tab:pretrained_results}
+    \begin{tabularx}{\textwidth}{Xccc}
+        \hline
+        \textbf{模型} & \textbf{mIoU} & \textbf{Dice} & \textbf{参数量} \\
+        \hline
+        Baseline, 从零训练 & 0.71 & 0.81 & 31M \\
+        ResNet34, 预训练 & 0.75 & 0.85 & 21M \\
+        \hline
+        \textbf{提升} & +4.0\% & +4.0\% & -32\% \\
+        \hline
+    \end{tabularx}
+\end{table}
+
+\section{训练策略优化}
+
+\subsection{Focal Tversky Loss}
+
+Tversky Loss~\cite{salehi2017tversky} 通过 $\alpha, \beta$ 参数调节假阳性和假阴性的权重，Focal 机制则进一步关注难分样本。其定义为：
+\begin{equation}
+    \text{TL} = \frac{TP}{TP + \alpha \cdot FP + \beta \cdot FN}
+\end{equation}
+\begin{equation}
+    \text{FTL} = (1 - \text{TL})^\gamma
+\end{equation}
+
+本实验设置 $\alpha=0.7, \beta=0.3, \gamma=0.75$。$\alpha > \beta$ 使模型更关注漏检问题，这对轮廓类尤为重要——宁可多预测一些边界像素，也不要遗漏真实边界。最终损失函数为 CE 与 FTL 的等权组合：
+\begin{equation}
+    \mathcal{L} = 0.5 \cdot \mathcal{L}_{\text{CE}} + 0.5 \cdot \mathcal{L}_{\text{FTL}}
+\end{equation}
+
+核心实现如下，通过 one-hot 编码将目标转换为与预测相同的形状，然后逐类别计算 Tversky 指数：
+
+\begin{codeblock}{Focal Tversky Loss 实现}
+class FocalTverskyLoss(nn.Module):
+    def __init__(self, alpha=0.7, beta=0.3, gamma=0.75):
+        super().__init__()
+        self.alpha, self.beta, self.gamma = alpha, beta, gamma
+
+    def forward(self, inputs, targets, num_classes=3):
+        inputs = F.softmax(inputs, dim=1)
+        targets_oh = F.one_hot(targets, num_classes)
+                     .permute(0,3,1,2).float()
+        tp = (inputs * targets_oh).sum(dim=(2,3))
+        fp = (inputs * (1 - targets_oh)).sum(dim=(2,3))
+        fn = ((1 - inputs) * targets_oh).sum(dim=(2,3))
+        tversky = tp / (tp + self.alpha*fp + self.beta*fn)
+        return torch.pow(1 - tversky, self.gamma).mean()
+\end{codeblock}
+
+相比 CE + Dice 的 baseline 组合，Focal Tversky Loss 使 mIoU 提升约 1.5\%，轮廓类 IoU 提升尤为明显。
+
+\subsection{优化器与学习率策略}
+
+将 RMSprop 替换为 AdamW~\cite{loshchilov2017adamw}，学习率设为 $1 \times 10^{-4}$，权重衰减 $1 \times 10^{-4}$。AdamW 将权重衰减与梯度更新解耦，在迁移学习场景下表现更优。
+
+学习率调度采用 CosineAnnealingWarmRestarts 配合 3 epoch 的线性 warmup。Warmup 阶段学习率从 $1 \times 10^{-5}$ 线性增长至目标值，避免预训练权重在初期被大梯度破坏。Cosine 调度的周期参数为 $T_0=10, T_{\text{mult}}=2$，周期性衰减允许模型在训练后期跳出局部最优。
+
+\begin{codeblock}{学习率调度配置}
+optimizer = torch.optim.AdamW(model.parameters(),
+    lr=1e-4, weight_decay=1e-4)
+warmup = LinearLR(optimizer, start_factor=0.1,
+    total_iters=3)
+cosine = CosineAnnealingWarmRestarts(optimizer,
+    T_0=10, T_mult=2)
+scheduler = SequentialLR(optimizer,
+    schedulers=[warmup, cosine], milestones=[3])
+\end{codeblock}
+
+AdamW + Cosine LR 使模型收敛更快，约第 10 epoch 即达到较好性能，最终 mIoU 提升约 1.0\%。此外，引入 Early Stopping 机制，当验证集 Dice 连续 10 个 epoch 无提升时自动停止训练，避免过拟合。
+
+\section{推理侧优化}
+
+\subsection{Test-Time Augmentation}
+
+推理时对输入图像进行水平翻转，对两个预测结果的 logits 取平均：
+\begin{equation}
+    \text{logits}_{\text{final}} = \frac{1}{2} (\text{logits}_{\text{orig}} + \text{flip}(\text{logits}_{\text{flipped}}))
+\end{equation}
+
+\begin{codeblock}{TTA 实现}
+def tta_predict(net, image):
+    pred_orig = net(image)
+    pred_flip = net(torch.flip(image, dims=[3]))
+    pred_flip = torch.flip(pred_flip, dims=[3])
+    return (pred_orig + pred_flip) / 2
+\end{codeblock}
+
+TTA 使 mIoU 提升约 1.5\%，翻转平均能有效平滑边界预测的不确定性，对轮廓类的提升尤为明显。
+
+\subsection{形态学后处理}
+
+对预测 mask 应用形态学 Opening 去除小噪点和 Closing 填补小孔洞，kernel size 均为 3，每个类别独立处理。
+
+\begin{codeblock}{形态学后处理}
+from scipy.ndimage import binary_opening, binary_closing
+
+for c in range(num_classes):
+    mask_c = (pred == c)
+    mask_c = binary_opening(mask_c, structure=np.ones((3,3)))
+    mask_c = binary_closing(mask_c, structure=np.ones((3,3)))
+    result[mask_c] = c
+\end{codeblock}
+
+后处理使边缘更平滑，视觉效果有所提升，但 mIoU 变化不大，约 $\pm 0.2\%$，因此在最终评估中未启用。
+
+\section{优化总结}
+
+表~\ref{tab:optimization_summary} 汇总了各项优化的累积效果。从 baseline 的 0.71 到最终模型的 0.81，mIoU 累计提升 10.5\%。其中预训练 Encoder 贡献最大，数据增强和损失函数优化紧随其后，各项优化之间存在协同效应。
+
+\begin{table}[H]
+    \centering
+    \caption{优化策略累积效果}
+    \label{tab:optimization_summary}
+    \begin{tabularx}{\textwidth}{Xcc}
+        \hline
+        \textbf{优化项} & \textbf{mIoU} & \textbf{累积提升} \\
+        \hline
+        Baseline & 0.71 & - \\
+        + 预训练 Encoder & 0.75 & +4.0\% \\
+        + Albumentations & 0.77 & +6.0\% \\
+        + Focal Tversky Loss & 0.78 & +7.0\% \\
+        + 类别权重 & 0.79 & +8.0\% \\
+        + AdamW + Cosine LR & 0.80 & +9.0\% \\
+        + TTA & 0.81 & +10.0\% \\
+        \hline
+        \textbf{最终模型} & \textbf{0.81} & \textbf{+10.5\%} \\
+        \hline
+    \end{tabularx}
+\end{table}

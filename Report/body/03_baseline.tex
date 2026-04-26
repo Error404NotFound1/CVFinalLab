@@ -1,0 +1,90 @@
+\chapter{Baseline 模型构建}
+\label{chap:baseline}
+
+\section{模型架构}
+
+本实验采用经典的 U-Net~\cite{ronneberger2015unet} 作为 baseline 模型。U-Net 由对称的编码器-解码器结构组成，编码器包含 5 层下采样，通道数从 64 逐步增加至 1024；解码器通过 5 层上采样恢复空间分辨率，并通过跳跃连接融合编码器各层的多尺度特征；最终由 $1 \times 1$ 卷积将特征映射到 3 个类别。网络参数量约 31M，输入尺寸统一为 $256 \times 256 \times 3$。所有卷积层权重采用 Kaiming 初始化~\cite{he2015delving}，从零开始训练，不使用任何预训练权重。
+
+\section{训练配置}
+
+数据预处理方面，所有图像统一缩放至 $256 \times 256$，使用 ImageNet 均值和标准差进行归一化，数据增强仅使用概率为 0.5 的水平翻转。损失函数采用 CrossEntropyLoss 和 DiceLoss 的等权组合：
+\begin{equation}
+    \mathcal{L} = \mathcal{L}_{\text{CE}} + \mathcal{L}_{\text{Dice}}
+\end{equation}
+
+其余超参数设置如表~\ref{tab:baseline_hyperparams} 所示。
+
+\begin{table}[H]
+    \centering
+    \caption{Baseline 训练超参数}
+    \label{tab:baseline_hyperparams}
+    \begin{tabularx}{\textwidth}{Xl}
+        \hline
+        \textbf{参数} & \textbf{值} \\
+        \hline
+        优化器 & RMSprop, momentum=0.999 \\
+        学习率 & $1 \times 10^{-5}$ \\
+        权重衰减 & $1 \times 10^{-8}$ \\
+        Batch Size & 8 \\
+        Epochs & 30 \\
+        学习率调度 & ReduceLROnPlateau, patience=5 \\
+        梯度裁剪 & 1.0 \\
+        \hline
+    \end{tabularx}
+\end{table}
+
+\section{Baseline 性能}
+
+在测试集上的评估结果如表~\ref{tab:baseline_results} 所示，mIoU 达到 0.71。
+
+\begin{table}[H]
+    \centering
+    \caption{Baseline 模型性能}
+    \label{tab:baseline_results}
+    \begin{tabularx}{\textwidth}{Xccc}
+        \hline
+        \textbf{指标} & \textbf{前景} & \textbf{背景} & \textbf{轮廓} \\
+        \hline
+        IoU & 0.77 & 0.87 & 0.47 \\
+        Dice & 0.87 & 0.93 & 0.64 \\
+        \hline
+        \textbf{mIoU} & \multicolumn{3}{c}{0.71} \\
+        \textbf{Mean Dice} & \multicolumn{3}{c}{0.81} \\
+        \textbf{Pixel Acc} & \multicolumn{3}{c}{0.91} \\
+        \hline
+    \end{tabularx}
+\end{table}
+
+\section{Baseline 分析}
+
+图~\ref{fig:baseline_curves} 展示了训练曲线，模型在第 15 epoch 左右基本收敛，之后验证集 Dice 趋于平稳。图~\ref{fig:baseline_terminal} 为测试集评估的终端输出。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{03_baseline_curves.jpg}
+    \caption{Baseline 训练曲线}
+    \label{fig:baseline_curves}
+\end{figure}
+
+图~\ref{fig:baseline_terminal} 和图~\ref{fig:baseline_predictions} 分别展示了 Baseline 的测试集评估输出和预测结果。从中可以观察到三个主要问题。
+
+首先是轮廓分割不准确，轮廓类 IoU 仅 0.47，远低于前景的 0.77 和背景的 0.87，模型难以捕捉仅 2--3 像素宽的边界。其次是小目标漏检，对于图像中较小的宠物，模型容易将其误判为背景。最后是边缘模糊，预测的前景边界不够锐利，从零训练的编码器缺乏足够的特征提取能力。
+
+这些问题为后续优化提供了明确方向：引入预训练权重增强特征提取、使用针对性损失函数缓解类别不平衡、通过高级数据增强提升泛化能力。
+
+\begin{figure}[H]
+    \centering
+    \begin{minipage}[t]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{baseline运行结果.png}
+        \caption{Baseline 测试集评估输出结果}
+        \label{fig:baseline_terminal}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[t]{0.45\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{03_baseline_predictions.jpg}
+        \caption{Baseline 预测结果可视化}
+        \label{fig:baseline_predictions}
+    \end{minipage}
+\end{figure}
